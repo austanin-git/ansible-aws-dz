@@ -1,0 +1,276 @@
+---
+- hosts: local
+  connection: local
+  gather_facts: False
+  vars:
+    instance_type: t2.micro
+    security_group: test_sec_1
+    image: ami-0c960b947cbb2dd16
+    keypair: key1
+    region: eu-central-1
+    count: 2
+    bucket_name: war-bucket-austanin
+    S3_object: /war
+  vars_files:
+    - aws_keys.yml
+
+# Tasks
+
+  tasks:
+    - name: Create a security group
+      ec2_group:
+        name: "{{ security_group }}"
+        description: The webservers security group
+        region: "{{ region }}"
+        aws_access_key: "{{ aws_access_key }}"
+        aws_secret_key: "{{ aws_secret_key }}"
+        rules:
+          - proto: tcp
+            from_port: 22
+            to_port: 22
+            cidr_ip: 0.0.0.0/0
+          - proto: tcp
+            from_port: 80
+            to_port: 80
+            cidr_ip: 0.0.0.0/0
+          - proto: tcp
+            from_port: 8080
+            to_port: 8080
+            cidr_ip: 0.0.0.0/0
+          - proto: tcp
+            from_port: 443
+            to_port: 443
+            cidr_ip: 0.0.0.0/0
+        rules_egress:
+          - proto: all
+            cidr_ip: 0.0.0.0/0
+  
+# Create S3 bucket
+
+    - name: Create a bucket
+      aws_s3:
+        bucket: "{{ bucket_name }}"
+        object: "{{ S3_object }}"
+        mode: create
+        region: "{{ region }}"
+
+# Launching maven
+
+    - name: Launch the maven Instance
+      ec2:
+        aws_access_key: "{{ aws_access_key }}"
+        aws_secret_key: "{{ aws_secret_key }}"
+        group: "{{ security_group }}"
+        instance_type: "{{ instance_type }}"
+        image: "{{ image }}"
+        wait: true
+        region: "{{ region }}"
+        key_name: "{{ keypair }}"
+        count: 1
+      register: ec2
+
+# Adding maven to hosts
+
+    - name: Add the newly created host so that we can further contact it
+      add_host:
+        name: "{{ item.public_ip }}"
+        groups: maven
+      with_items: "{{ ec2.instances }}"
+
+# Tagging a maven
+
+    - name: Add tag to Instance(s)
+      ec2_tag:
+        aws_access_key: "{{ aws_access_key }}"
+        aws_secret_key: "{{ aws_secret_key }}"
+        resource: "{{ item.id }}"
+        region: "{{ region }}"
+        state: "present"
+      with_items: "{{ ec2.instances }}"
+      args:
+        tags:
+          Type: maven
+
+# SSH is up?
+
+    - name: Wait for SSH to come up
+      wait_for:
+        host: "{{ item.public_ip }}"
+        port: 22
+        state: started
+      with_items: "{{ ec2.instances }}"
+
+# Launch tomcat
+
+    - name: Launch the tomcat Instance
+      ec2:
+        aws_access_key: "{{ aws_access_key }}"
+        aws_secret_key: "{{ aws_secret_key }}"
+        group: "{{ security_group }}"
+        instance_type: "{{ instance_type }}"
+        image: "{{ image }}"
+        wait: true
+        region: "{{ region }}"
+        key_name: "{{ keypair }}"
+        count: 1
+      register: ec2
+
+# Add tomcat to hosts
+
+    - name: Add the newly created host so that we can further contact it
+      add_host:
+        name: "{{ item.public_ip }}"
+        groups: tomcat
+      with_items: "{{ ec2.instances }}"
+
+# Tagging a tomcat
+
+    - name: Add tag to Instance(s)
+      ec2_tag:
+        aws_access_key: "{{ aws_access_key }}"
+        aws_secret_key: "{{ aws_secret_key }}"
+        resource: "{{ item.id }}"
+        region: "{{ region }}"
+        state: "present"
+      with_items: "{{ ec2.instances }}"
+      args:
+        tags:
+          Type: tomcat
+
+# SSH is up?
+
+    - name: Wait for SSH to come up
+      wait_for:
+        host: "{{ item.public_ip }}"
+        port: 22
+        state: started
+      with_items: "{{ ec2.instances }}"
+
+# Building a .war
+
+- hosts: maven
+  remote_user: ubuntu
+  become: yes
+  gather_facts: no
+  vars:
+    maven_repo: https://github.com/boxfuse/boxfuse-sample-java-war-hello
+    bucket_name: war-bucket-austanin
+  vars_files:
+    - aws_keys.yml
+
+  tasks:
+    - name: Is Updated?
+      apt:
+        update_cache: yes
+        cache_valid_time: 86400 #One day
+
+# Installing the packages
+
+    - name: is git installed?
+      apt:
+        name: git
+        state: present
+
+    - name: is maven installed?
+      apt:
+        name: maven
+        state: present
+
+    - name: is java installed?
+      apt:
+        name: default-jre
+        state: present
+
+    - name: is python installed?
+      apt:
+        name: python
+        state: present
+
+    - name: is python3-pip installed?
+      apt:
+        name: python3-pip
+        state: present
+
+    - name: Install boto3 and botocore with pip3 module
+      pip:
+        name:
+          - boto3
+          - botocore
+
+    - name: Clone a repo with separate git directory
+      git:
+        repo: https://github.com/boxfuse/boxfuse-sample-java-war-hello
+        dest: /src/
+
+  # Run mvn package
+
+    - name: Run maven package
+      shell: mvn package -am -T 1C
+      args:
+        chdir: /src/
+
+# Putting .war in a S3 bucket
+
+    - name: 
+      aws_s3:
+        bucket: "{{ bucket_name }}"
+        object: /war/hello-1.0.war
+        src: /src/target/hello-1.0.war
+        mode: put
+        aws_access_key: "{{ aws_access_key }}"
+        aws_secret_key: "{{ aws_secret_key }}"    
+
+# Tomcat operations
+
+- hosts: tomcat
+  remote_user: ubuntu
+  become: yes
+  gather_facts: no
+  vars:
+    bucket_name: war-bucket-austanin
+  vars_files:
+    - aws_keys.yml
+
+# Tomcat tasks
+
+  tasks:
+    - name: Is Updated?
+      apt:
+        update_cache: yes
+        cache_valid_time: 86400 #One day
+
+# Installing the packages
+
+    - name: Is Installed?
+      apt:
+        name: tomcat9
+        state: present
+
+    - name: is python installed?
+      apt:
+        name: python
+        state: present
+
+    - name: is python3-pip installed?
+      apt:
+        name: python3-pip
+        state: present
+
+    - name: Install boto3 and botocore with pip3 module
+      pip:
+        name:
+          - boto3
+          - botocore
+    
+
+# Get .war from S3
+
+    - name: Simple GET operation
+      aws_s3:
+        bucket: "{{ bucket_name }}"
+        object: /war/hello-1.0.war
+        dest: /var/lib/tomcat9/webapps/hello-1.0.war
+        mode: get
+        aws_access_key: "{{ aws_access_key }}"
+        aws_secret_key: "{{ aws_secret_key }}"
+
